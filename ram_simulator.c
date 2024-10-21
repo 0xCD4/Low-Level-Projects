@@ -1,112 +1,175 @@
+// RAM simulator in C
+// virtual memory: 0-255    
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#define RAM_SIZE (1024 * 1024) // 1MB
-#define ROWHAMMER_THRESHOLD 10000
+#include <stdbool.h>
 
-typedef enum{
 
-    READ_ONLY,
-    READ_WRITE,
-} MemoryProtection;
+#define PHYSICAL_MEMORY_SIZE 1024
+#define PHYSICAL_FRAMES 16
+#define VIRTUAL_PAGES 64
 
-typedef struct {
-    int start_address; 
-    int end_address; 
-    MemoryProtection protection; 
-} MemoryRegion;
 
-/**
- * @file ram_simulator.c
- * @brief This file contains the implementation of a RAM simulator.
- *
- * The RAM simulator is designed to emulate the behavior of memory regions.
- * It includes the definition and initialization of memory regions.
- */
+typedef struct{
+    int frame_number;
+}PageTableEntry;
 
-/**
- * @brief Array of memory regions.
- *
- * This array holds the different memory regions that are part of the RAM simulator.
- * Each element in the array represents a distinct memory region with its own properties.
- */
-MemoryRegion regions[] = {
-    {0x00000000, 0x0000FFFF, READ_ONLY},  // 0 - 65535  
-    {0x00010000, 0x000FFFFF, READ_WRITE}  // 65536 - 1048575
-};
+typedef struct{
 
-typedef struct {
-    uint32_t address;
-    int value;
-} MemoryAccess;
+unsigned char PHYSICAL_MEMORY[PHYSICAL_MEMORY_SIZE]; // physical memory
+PageTableEntry page_table[VIRTUAL_PAGES]; // page table
+int free_frames[PHYSICAL_FRAMES]; // free frames in physical memory
 
-uint8_t ram[RAM_SIZE] = {0};
-int access_count[RAM_SIZE] = {0};
+}RamSimulator;
 
-int check_protection(uint32_t address, MemoryProtection protection){
-    for(int i = 0; i < sizeof(regions) / sizeof(MemoryRegion); i++){
-        if(address >= regions[i].start_address && address <= regions[i].end_address){
-            return regions[i].protection == protection;
+
+// we need to create a simulator that will read and write to the RAM
+
+bool initialize_simulator(RamSimulator *ram){
+    for(int i = 0; i < PHYSICAL_MEMORY_SIZE; i++){
+        ram->PHYSICAL_MEMORY[i] = 0; // we will initialize the physical memory to 0
+        int physical_address = ram->page_table[page_number].frame_number * (PHYSICAL_MEMORY_SIZE / PHYSICAL_FRAMES) + offset;
+        ram->PHYSICAL_MEMORY[physical_address] = data;
+        return true;
+    }
+    printf("RAM simulator initialized\n");
+  
+
+    // we need to create a page table  
+    for(int i = 0;i<VIRTUAL_PAGES;i++){
+        ram->page_table[i].frame_number = -1; // this indicates that the page is not mapped -1 
+    }
+
+    // we need to create a free frames array
+    for(int i = 0;i<PHYSICAL_FRAMES;i++){
+        ram->free_frames[i] = 0; // 0 indicates that the frame is free
+    }
+
+    return true;
+}
+bool write_memory(RamSimulator *ram, unsigned int virtual_address, unsigned char data) {
+
+
+bool write_memory(RamSimulator *ram, unsigned int virtual_address, unsigned char data){
+  
+    unsigned int page_number = virtual_address / (PHYSICAL_MEMORY_SIZE / VIRTUAL_PAGES);
+    unsigned int offset = virtual_address % (PHYSICAL_MEMORY_SIZE / PHYSICAL_FRAMES);
+
+    if(page_number >= VIRTUAL_PAGES){
+        printf("Error: Page number %u is out of bounds\n", page_number);
+        return false;
+    }
+
+    // we should find free frame in physical memory
+    if(ram->page_table[page_number].frame_number == -1){
+        int free_frame = find_free_frame(ram);
+        if(free_frame == -1){
+            printf("Error: No free frame available\n");
+            return false;
         }
+        ram->page_table[page_number].frame_number = free_frame;
+        ram->free_frames[free_frame] = 1; // we will mark this as used
+        printf("Page number %u mapped to frame number %d\n", page_number, free_frame);
     }
-    return 0;
+
+}
+bool read_memory(RamSimulator *ram, unsigned int virtual_address, unsigned char *data) {
+// read from memory 
+
+bool read_memory(RamSimulator *ram, unsigned int virtual_address, unsigned char data) {
+    unsigned int page_number = virtual_address / (PHYSICAL_MEMORY_SIZE / PHYSICAL_FRAMES);
+    unsigned int offset = virtual_address % (PHYSICAL_MEMORY_SIZE / PHYSICAL_FRAMES);
+
+    printf("Virtual Address: %u\n", virtual_address);
+    printf("Page Number: %u\n", page_number);
+    printf("Offset: %u\n", offset);
+
+    if (page_number >= VIRTUAL_PAGES) {
+        printf("Error: Page number %u is out of bounds\n", page_number);
+        return false;
+    }
+
+    if (ram->page_table[page_number].frame_number == -1) {
+        printf("Error: Page number %u is not mapped to any frame\n", page_number);
+        return false;
+    }
+
+    int physical_address = ram->page_table[page_number].frame_number * (PHYSICAL_MEMORY_SIZE / PHYSICAL_FRAMES) + offset;
+    printf("Physical Address: %d\n", physical_address);
+
+    if (physical_address >= PHYSICAL_MEMORY_SIZE) {
+        printf("Error: Physical address %d is out of bounds\n", physical_address);
+        return false;
+    }
+
+
 }
 
 
-
-void check_rowhammer(uint32_t address) {
-    access_count[address]++;
-    if (access_count[address] > ROWHAMMER_THRESHOLD) {
-        printf("Warning: Potential Rowhammer attack detected at address 0x%08X\n", address);
-    }
-}
-
-
-void write_ram(uint32_t address, int value){
-    if (address >= RAM_SIZE) {
-        printf("Error: Address out of range\n");
-        return;
-    }
-    if(check_protection(address, READ_WRITE)){
-        ram[address] = value;
-        printf("Data written to memory cell %d\n", address);
-    }else{
-        printf("Error: Write to read-only memory\n");
-        exit(EXIT_FAILURE);
-    }
-}
-
-int read_ram(uint32_t address){
-
-    if(address >= RAM_SIZE){
-        printf("Error: Address out of range\n");
-        return -1;
-    }
-        for(int i = 0; i < sizeof(regions) / sizeof(MemoryRegion); i++){
-            if(address >= regions[i].start_address && address <= regions[i].end_address){
-                return ram[address];
-            }
-        }
-        return -1;
-    }
 
 
 int main(){
 
-    uint32_t address;
-    int value;
+    // RAM simulator 
+    RamSimulator ram;
 
-    printf("Enter memory address to write to (in hex, e.g., 0x00010000): ");
-    scanf("%x", &address);
-    printf("Enter value to write: ");
-    scanf("%d", &value);
+    if(!initialize_simulator(&ram)){
+        fprintf(stderr, "RAM simulator initialization failed\n");
+        return EXIT_FAILURE;
+    }
 
-    write_ram(address, value);
+    int choice;
+    unsigned int address;
+    unsigned char data;
 
-    int data = read_ram(0x00010000); // read from memory cell 65536
-    printf("Data at address 0x00010000: %d\n", data);
-    //for(int i = 0; i < sizeof(regions) / sizeof(MemoryRegion); i++){
-      //  printf("Region %d: Start Address: 0x%08X, End Address: 0x%08X, Protection: %s\n", i, regions[i].start_address, regions[i].end_address, regions[i].protection == READ_ONLY ? "Read-Only" : "Read-Write");
-    //}
+    while(1){
+        printf("\nSelect an option:\n");
+        printf("1. Write to RAM\n");
+        printf("2. Read from RAM\n");
+        printf("3. Exit\n");
+        printf("Enter your choice: ");
+        
+        if(scanf("%d", &choice) != 1){
+            printf("Invalid input. Please enter a number.\n");
+            while(getchar() != '\n'); // clear the input buffer
+            continue;
+        }
 
+        switch(choice){
+            case 1:
+                printf("Enter virtual address (0-255): ");
+                if(scanf("%u", &address) != 1 || address >= PHYSICAL_MEMORY_SIZE){
+                    printf("Invalid address. Please enter a value between 0 and 255\n");
+                    break;
+                }
+                printf("Enter value to write (0-255): ");
+                if(scanf("%hhu", &data) != 1){
+                    printf("Invalid value. Please enter a value between 0 and 255\n");
+                    break;
+                }
+                if(write_memory(&ram, address, data)){
+                    printf("Successfully written %u to address %u\n", data, address);
+                }
+                break;
+            case 2:
+                printf("Enter virtual address (0-255): ");
+                if(scanf("%u", &address) != 1 || address >= 256){
+                    printf("Invalid address. Please enter a value between 0 and 255\n");
+                    break;
+                }
+                if(read_memory(&ram, address, &data)){
+                    printf("Data at address %u is %u\n", address, data);
+                }
+                break;
+            case 3:
+                printf("Exiting...\n");
+                return EXIT_SUCCESS;
+            default:
+                printf("Invalid choice. Please select a valid operation\n");
+                break;
+        }
+    }
+
+    return EXIT_SUCCESS;
 }
