@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include <string.h>
+#include <stdint.h>
 
 #define PHYSICAL_MEMORY_SIZE 1024
 #define PHYSICAL_FRAMES 16
@@ -13,90 +14,110 @@
 typedef struct {
     int frame_number;
     bool valid;
+    uint8_t padding[3];
 } PageTableEntry;
 
 typedef struct {
-    unsigned char PHYSICAL_MEMORY[PHYSICAL_MEMORY_SIZE];
+    uint8_t PHYSICAL_MEMORY[PHYSICAL_MEMORY_SIZE];
     PageTableEntry page_table[VIRTUAL_PAGES];
-    int free_frames[PHYSICAL_FRAMES];
-    int access_count[PHYSICAL_FRAMES];
+    uint16_t free_frames_bitmap;
+    uint32_t access_count[PHYSICAL_FRAMES];
     time_t last_access_time[PHYSICAL_FRAMES];
+    uint64_t performance_stats[4]; // hits, misses, reads, writes
 } RamSimulator;
 
-bool initialize_simulator(RamSimulator *ram) {
-    memset(ram->PHYSICAL_MEMORY, 0, PHYSICAL_MEMORY_SIZE);
+static inline bool is_frame_free(uint16_t bitmap, int frame) {
+    return !(bitmap & (1 << frame));
+}
+
+static inline void mark_frame_used(uint16_t* bitmap, int frame) {
+    *bitmap |= (1 << frame);
+}
+
+static inline void mark_frame_free(uint16_t* bitmap, int frame) {
+    *bitmap &= ~(1 << frame);
+}
+
+bool initialize_simulator(RamSimulator* ram) {
+    if (!ram) return false;
     
+    memset(ram->PHYSICAL_MEMORY, 0, PHYSICAL_MEMORY_SIZE);
     for (int i = 0; i < VIRTUAL_PAGES; i++) {
         ram->page_table[i].frame_number = -1;
         ram->page_table[i].valid = false;
     }
     
-    for (int i = 0; i < PHYSICAL_FRAMES; i++) {
-        ram->free_frames[i] = 0;
-        ram->access_count[i] = 0;
-        ram->last_access_time[i] = 0;
-    }
+    ram->free_frames_bitmap = 0;
+    memset(ram->access_count, 0, sizeof(uint32_t) * PHYSICAL_FRAMES);
+    memset(ram->last_access_time, 0, sizeof(time_t) * PHYSICAL_FRAMES);
+    memset(ram->performance_stats, 0, sizeof(uint64_t) * 4);
     
-    printf("RAM simulator initialized\n");
     return true;
 }
 
-int find_free_frame(RamSimulator *ram) {
+int find_free_frame(RamSimulator* ram) {
+    if (!ram) return -1;
+    
+    if (ram->free_frames_bitmap == 0xFFFF) return -1;
+    
     for (int i = 0; i < PHYSICAL_FRAMES; i++) {
-        if (ram->free_frames[i] == 0) return i;
+        if (is_frame_free(ram->free_frames_bitmap, i)) {
+            mark_frame_used(&ram->free_frames_bitmap, i);
+            return i;
+        }
     }
     return -1;
 }
 
-void check_rowhammer(RamSimulator *ram, int frame_number) {
+void check_rowhammer(RamSimulator* ram, int frame_number) {
     time_t current_time = time(NULL);
     if (ram->access_count[frame_number] > ROWHAMMER_THRESHOLD &&
-        difftime(current_time, ram->last_access_time[frame_number]) < 1) {
+        difftime(current_time, ram->last_access_time[frame_number]) < 1.0) {
         printf("WARNING: Potential Rowhammer attack detected on frame %d!\n", frame_number);
         printf("Access count: %d\n", ram->access_count[frame_number]);
     }
     ram->last_access_time[frame_number] = current_time;
 }
 
-bool write_memory(RamSimulator *ram, unsigned int virtual_address, unsigned char data) {
+bool write_memory(RamSimulator* ram, unsigned int virtual_address, unsigned char data) {
+    if (!ram || virtual_address >= PHYSICAL_MEMORY_SIZE) return false;
+    
     unsigned int page_number = virtual_address / PAGE_SIZE;
     unsigned int offset = virtual_address % PAGE_SIZE;
     
-    if (page_number >= VIRTUAL_PAGES) {
-        printf("Error: Page number %u is out of bounds\n", page_number);
-        return false;
-    }
+    ram->performance_stats[3]++; // Increment writes
     
     if (!ram->page_table[page_number].valid) {
         int free_frame = find_free_frame(ram);
         if (free_frame == -1) {
             printf("Error: No free frames available\n");
+            ram->performance_stats[1]++; // Increment misses
             return false;
         }
         ram->page_table[page_number].frame_number = free_frame;
         ram->page_table[page_number].valid = true;
-        ram->free_frames[free_frame] = 1;
     }
     
     int frame_number = ram->page_table[page_number].frame_number;
     ram->PHYSICAL_MEMORY[frame_number * PAGE_SIZE + offset] = data;
     ram->access_count[frame_number]++;
     check_rowhammer(ram, frame_number);
+    ram->performance_stats[0]++; // Increment hits
     
     return true;
 }
 
-bool read_memory(RamSimulator *ram, unsigned int virtual_address, unsigned char *data) {
+bool read_memory(RamSimulator* ram, unsigned int virtual_address, unsigned char* data) {
+    if (!ram || !data || virtual_address >= PHYSICAL_MEMORY_SIZE) return false;
+    
     unsigned int page_number = virtual_address / PAGE_SIZE;
     unsigned int offset = virtual_address % PAGE_SIZE;
     
-    if (page_number >= VIRTUAL_PAGES) {
-        printf("Error: Page number %u is out of bounds\n", page_number);
-        return false;
-    }
+    ram->performance_stats[2]++; // Increment reads
     
     if (!ram->page_table[page_number].valid) {
         printf("Error: Page fault - address not mapped\n");
+        ram->performance_stats[1]++; // Increment misses
         return false;
     }
     
@@ -104,44 +125,53 @@ bool read_memory(RamSimulator *ram, unsigned int virtual_address, unsigned char 
     *data = ram->PHYSICAL_MEMORY[frame_number * PAGE_SIZE + offset];
     ram->access_count[frame_number]++;
     check_rowhammer(ram, frame_number);
+    ram->performance_stats[0]++; // Increment hits
     
     return true;
 }
 
-void show_memory_stats(RamSimulator *ram) {
-    printf("\nMemory Statistics:\n");
-    printf("Used frames: ");
-    int used = 0;
-    for (int i = 0; i < PHYSICAL_FRAMES; i++) {
-        if (ram->free_frames[i]) {
-            printf("%d ", i);
-            used++;
-        }
+void print_stats(RamSimulator* ram) {
+    if (!ram) return;
+    printf("\nPerformance Statistics:\n");
+    printf("Cache Hits: %lu\n", ram->performance_stats[0]);
+    printf("Cache Misses: %lu\n", ram->performance_stats[1]);
+    printf("Total Reads: %lu\n", ram->performance_stats[2]);
+    printf("Total Writes: %lu\n", ram->performance_stats[3]);
+    float hit_rate = 0;
+    if (ram->performance_stats[0] + ram->performance_stats[1] > 0) {
+        hit_rate = (float)ram->performance_stats[0] / 
+                   (ram->performance_stats[0] + ram->performance_stats[1]) * 100;
     }
-    printf("\nTotal frames used: %d/%d\n", used, PHYSICAL_FRAMES);
+    printf("Hit Rate: %.2f%%\n", hit_rate);
 }
 
-int main() {
+int main(void) {
     RamSimulator ram;
     
     if (!initialize_simulator(&ram)) {
         fprintf(stderr, "Failed to initialize RAM simulator\n");
-        return EXIT_FAILURE;}
+        return EXIT_FAILURE;
+    }
     
     int choice;
     unsigned int address;
     unsigned char data;
+    char input_buffer[32];
     
     while (1) {
         printf("\nRAM Simulator Menu:\n");
         printf("1. Write to RAM\n");
         printf("2. Read from RAM\n");
-        printf("3. Show Memory Stats\n");
+        printf("3. Show Statistics\n");
         printf("4. Exit\n");
         printf("Enter choice (1-4): ");
         
-        if (scanf("%d", &choice) != 1) {
-            while (getchar() != '\n');
+        if (fgets(input_buffer, sizeof(input_buffer), stdin) == NULL) {
+            printf("Error reading input\n");
+            continue;
+        }
+        
+        if (sscanf(input_buffer, "%d", &choice) != 1) {
             printf("Invalid input. Please enter a number.\n");
             continue;
         }
@@ -165,6 +195,7 @@ int main() {
                 if (write_memory(&ram, address, data)) {
                     printf("Successfully wrote %u to address %u\n", data, address);
                 }
+                while (getchar() != '\n');
                 break;
                 
             case 2:
@@ -178,18 +209,19 @@ int main() {
                 if (read_memory(&ram, address, &data)) {
                     printf("Value at address %u: %u\n", address, data);
                 }
+                while (getchar() != '\n');
                 break;
                 
             case 3:
-                show_memory_stats(&ram);
+                print_stats(&ram);
                 break;
                 
             case 4:
-                printf("Exiting RAM simulator...\n");
+                printf("Exiting...\n");
                 return EXIT_SUCCESS;
                 
             default:
-                printf("Invalid choice. Please select 1-4.\n");
+                printf("Invalid choice. Please enter 1-4.\n");
                 break;
         }
     }
