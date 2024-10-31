@@ -126,8 +126,7 @@ int main() {
     
     if (!initialize_simulator(&ram)) {
         fprintf(stderr, "Failed to initialize RAM simulator\n");
-        return EXIT_FAILURE;
-    }
+        return EXIT_FAILURE;}
     
     int choice;
     unsigned int address;
